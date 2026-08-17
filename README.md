@@ -1,7 +1,11 @@
 # rs-dyno
 
-Standalone dynobank voor FiveM. Gebruik `/dyno` als bestuurder; de resource meet tien seconden en geeft een reproduceerbare voertuigindicatie. Resultaten worden server-side begrensd en kunnen naar Discord worden gelogd.
+Standalone dynotestbank die gekoppeld is aan het medewerkerssysteem van `rs-bikemechanic`.
 
 ## Installatie
-Plaats de map in `resources`, pas `config.lua` aan en voeg `ensure rs-dyno` toe. `RS-core` is optioneel maar aanbevolen voor centrale webhooklogging.
 
+1. Importeer `sql/install.sql`.
+2. Start `rs-bikemechanic` vóór `rs-dyno`.
+3. Pas locatie en meetwaarden aan in `config.lua`.
+
+Alleen geregistreerde medewerkers die in dienst zijn kunnen een test uitvoeren. Start, duur, voertuig, locatie en kenteken worden server-side gevalideerd. Resultaten worden opgeslagen en naar de services-webhook gelogd.

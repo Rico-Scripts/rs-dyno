@@ -1,30 +1,35 @@
-local cooldown = {}
-
-RegisterNetEvent('rs-dyno:server:result', function(data)
-    local src = source
-    if Config.RequireAce and not IsPlayerAceAllowed(src, Config.Ace) then return end
-    local now = os.time()
-    if cooldown[src] and cooldown[src] > now then return end
-    if type(data) ~= 'table' or type(data.speed) ~= 'number' or data.speed < 0 or data.speed > Config.MaxSpeedKmh then return end
-    data.plate = tostring(data.plate or 'ONBEKEND'):sub(1, 12)
-    data.model = tostring(data.model or 'ONBEKEND'):sub(1, 32)
-    data.hp = math.max(1, math.min(2500, math.floor(tonumber(data.hp) or 1)))
-    data.rpm = math.max(0, math.min(1, tonumber(data.rpm) or 0))
-    cooldown[src] = now + Config.CooldownSeconds
-    TriggerClientEvent('rs-dyno:client:result', src, data)
-
-    local fields = {
-        { name = 'Speler', value = ('%s (`%s`)'):format(GetPlayerName(src) or 'Onbekend', src), inline = false },
-        { name = 'Voertuig', value = data.model, inline = true },
-        { name = 'Kenteken', value = data.plate, inline = true },
-        { name = 'Meting', value = ('%d pk indicatie\n%.1f km/u\n%.0f%% RPM'):format(data.hp, data.speed, data.rpm * 100), inline = false }
-    }
-    if GetResourceState('RS-core') == 'started' then
-        exports['RS-core']:Log('Dyno-meting', 'Een nieuwe dyno-meting is voltooid.', 10181046, fields, Config.Webhook ~= '' and Config.Webhook or nil)
-    elseif Config.Webhook ~= '' then
-        PerformHttpRequest(Config.Webhook, function() end, 'POST', json.encode({ username = 'Rico Scripts', embeds = {{ title = 'Dyno-meting', color = 10181046, fields = fields }} }), { ['Content-Type'] = 'application/json' })
-    end
+local pending,cooldowns={},{}
+local function identifier(source)for _,prefix in ipairs({'license2:','license:','fivem:'})do for _,id in ipairs(GetPlayerIdentifiers(source))do if id:sub(1,#prefix)==prefix then return id end end end end
+local function employee(source)local id=identifier(source);if not id then return end;return MySQL.single.await('SELECT identifier,player_name,rank,on_duty FROM rs_bikemechanic_employees WHERE identifier=?',{id})end
+local function throttle(source,key,wait)local now=GetGameTimer();local token=source..':'..key;if cooldowns[token]and now-cooldowns[token]<wait then return false end;cooldowns[token]=now;return true end
+local function validVehicle(source,netId)
+    local entity=NetworkGetEntityFromNetworkId(tonumber(netId) or -1);if not entity or entity==0 or not DoesEntityExist(entity) or GetVehicleClass(entity)~=Config.MotorcycleClass then return false end
+    local ped=GetPlayerPed(source);if not ped or ped==0 then return false end
+    if #(GetEntityCoords(entity)-Config.Dyno.coords)>Config.Dyno.maxVehicleDistance+1.0 or #(GetEntityCoords(ped)-Config.Dyno.coords)>Config.Dyno.maxVehicleDistance+2.0 then return false end
+    return true,entity
+end
+local function webhook(source,result)
+    local url=GetConvar('rs_bikemechanic_webhook_services',GetConvar('rs_bikemechanic_webhook_default',''));if url==''then return end
+    PerformHttpRequest(url,function()end,'POST',json.encode({username='Moto Workshop Logs',allowed_mentions={parse={}},embeds={{title='Dynotest afgerond',color=5763719,fields={{name='Monteur',value=GetPlayerName(source),inline=true},{name='Kenteken',value=result.plate,inline=true},{name='Resultaat',value=('%s PK / %s Nm'):format(result.horsepower,result.torque),inline=true}},timestamp=os.date('!%Y-%m-%dT%H:%M:%SZ')}}}),{['Content-Type']='application/json'})
+end
+lib.callback.register('rs-dyno:start',function(source,netId)
+    if not throttle(source,'start',1000)then return false,'Wacht even.'end;local worker=employee(source);if not worker or worker.on_duty~=1 then return false,'Je bent niet in dienst.'end
+    local valid,entity=validVehicle(source,netId);if not valid then return false,'Motor of locatie kon niet worden bevestigd.'end
+    pending[source]={netId=tonumber(netId),plate=tostring(GetVehicleNumberPlateText(entity)or''):match('^%s*(.-)%s*$'),started=GetGameTimer()};return true
 end)
-
-AddEventHandler('playerDropped', function() cooldown[source] = nil end)
-
+lib.callback.register('rs-dyno:finish',function(source,netId,result)
+    if not throttle(source,'finish',1000)or type(result)~='table'then return false,'Ongeldige aanvraag.'end;local job=pending[source];pending[source]=nil
+    if not job or job.netId~=tonumber(netId)or GetGameTimer()-job.started<Config.Dyno.duration-750 then return false,'Dynotest is niet geldig voltooid.'end
+    local worker=employee(source);local valid,entity=validVehicle(source,netId);if not worker or worker.on_duty~=1 or not valid then return false,'Validatie mislukt.'end
+    local plate=tostring(GetVehicleNumberPlateText(entity)or''):match('^%s*(.-)%s*$');if plate~=job.plate or result.plate~=plate then return false,'Kentekencontrole mislukt.'end
+    local hp,torque,top=math.floor(tonumber(result.horsepower) or -1),math.floor(tonumber(result.torque) or -1),math.floor(tonumber(result.topSpeed) or -1)
+    if hp<0 or hp>2500 or torque<0 or torque>3000 or top<0 or top>700 then return false,'Resultaat buiten bereik.'end
+    MySQL.insert.await([[INSERT INTO rs_dyno_history(plate,model,mechanic_identifier,mechanic_name,horsepower,torque,top_speed,zero_to_hundred)VALUES(?,?,?,?,?,?,?,?)]],{plate,tostring(result.model or 'unknown'):sub(1,64),worker.identifier,GetPlayerName(source),hp,torque,top,tonumber(result.zeroToHundred) or 0})
+    webhook(source,{plate=plate,horsepower=hp,torque=torque});return true
+end)
+lib.callback.register('rs-dyno:history',function(source)if not throttle(source,'history',1500)then return{}end;local worker=employee(source);if not worker then return{}end;return MySQL.query.await('SELECT plate,model,mechanic_name,horsepower,torque,top_speed,zero_to_hundred,tested_at FROM rs_dyno_history ORDER BY id DESC LIMIT 50')end)
+AddEventHandler('playerDropped',function()
+    pending[source]=nil
+    local prefix=source..':'
+    for key in pairs(cooldowns)do if key:sub(1,#prefix)==prefix then cooldowns[key]=nil end end
+end)
